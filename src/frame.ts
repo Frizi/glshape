@@ -1,7 +1,8 @@
 import { assert, assertNever } from "./assert";
-import { shaderManager } from "./shaderManager";
+import { Rate, shaderManager } from "./shaderManager";
 import { Matrix4x4, Vec3 } from "./algebra";
 import { PathSegmentDef, glyphE, PathSeg, glyphA } from "./glyphData";
+import { AnyBuffer, createDynamicBuffer, createStaticBuffer } from "./buffer";
 
 export const ctxOptions: WebGLContextAttributes = {
   preserveDrawingBuffer: false,
@@ -209,10 +210,10 @@ export function init(gl: WebGL2RenderingContext) {
     return { linearFb, linearColor, depth, glyphFb, glyphColor };
   }
 
-  const SMOOTHING = 3;
+  const SMOOTHING = 1;
   function setupOffsetBuffer() {
-    const xUnit = SMOOTHING / gl.canvas.width / 6;
-    const yUnit = SMOOTHING / gl.canvas.height / 6;
+    const xUnit = SMOOTHING / gl.canvas.width;
+    const yUnit = SMOOTHING / gl.canvas.height;
 
     // -----x
     // -x----
@@ -265,12 +266,13 @@ export function init(gl: WebGL2RenderingContext) {
   // let viewInverse = Matrix4x4.identity;
   let worldToClip = Matrix4x4.identity;
 
+  // let lastFov = 0;
   function updateCamera(t: number) {
     const aspectRatio = gl.canvas.width / gl.canvas.height;
     if (aspectRatio !== projAspectRatio) {
       projAspectRatio = aspectRatio;
       projection = Matrix4x4.perspectiveRhGl(
-        1, // 90deg
+        Math.PI / 2, // 90deg
         projAspectRatio,
         0.1,
         1000
@@ -300,54 +302,41 @@ export function init(gl: WebGL2RenderingContext) {
   }
 
   function drawTriangles() {
-    const shader = shaderMgr.use("posColor", "flatColor");
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.GEQUAL);
     gl.depthMask(true);
     gl.disable(gl.BLEND);
-    // gl.blend
 
-    // Draw triangles
-    gl.uniformBlockBinding(shader.program, shader.uniforms.viewData, 0);
-    gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, modelViewProjection.buffer);
-    gl.enableVertexAttribArray(shader.attributes.position);
-    gl.vertexAttribDivisor(shader.attributes.position, 0);
-    triangleCoords.bind();
-    gl.vertexAttribPointer(
-      shader.attributes.position,
-      3,
-      gl.FLOAT,
-      false,
-      0,
-      0
-    );
-    triangleColors.bind();
-    gl.enableVertexAttribArray(shader.attributes.color);
-    gl.vertexAttribDivisor(shader.attributes.color, 0);
-    gl.vertexAttribPointer(shader.attributes.color, 3, gl.FLOAT, false, 0, 0);
     assert(triangleCoords.length == triangleColors.length);
+    shaderMgr.use(
+      ["posColor", "flatColor"],
+      {
+        position: triangleCoords,
+        color: triangleColors,
+      },
+      (shader) => {
+        gl.uniformBlockBinding(shader.program, shader.uniforms.viewData, 0);
+        gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, modelViewProjection.buffer);
+        setModelMatrix(Matrix4x4.translate(Vec3.new(0, 0, 0)));
+        gl.drawArrays(gl.TRIANGLES, 0, triangleColors.length / 3);
 
-    setModelMatrix(Matrix4x4.translate(Vec3.new(0, 0, 0)));
-    gl.drawArrays(gl.TRIANGLES, 0, triangleColors.length / 3);
+        setModelMatrix(
+          Matrix4x4.mulMany(
+            Matrix4x4.translate(Vec3.new(0, 0, -0.1)),
+            Matrix4x4.scale(1.2)
+          )
+        );
+        gl.drawArrays(gl.TRIANGLES, 0, triangleColors.length / 3);
 
-    setModelMatrix(
-      Matrix4x4.mulMany(
-        Matrix4x4.scale(1.2),
-        Matrix4x4.translate(Vec3.new(0, 0, -0.1))
-      )
+        setModelMatrix(
+          Matrix4x4.mulMany(
+            Matrix4x4.translate(Vec3.new(0, 0, -0.2)),
+            Matrix4x4.scale(1.5)
+          )
+        );
+        gl.drawArrays(gl.TRIANGLES, 0, triangleColors.length / 3);
+      }
     );
-    gl.drawArrays(gl.TRIANGLES, 0, triangleColors.length / 3);
-
-    setModelMatrix(
-      Matrix4x4.mulMany(
-        Matrix4x4.scale(1.5),
-        Matrix4x4.translate(Vec3.new(0, 0, -0.2))
-      )
-    );
-    gl.drawArrays(gl.TRIANGLES, 0, triangleColors.length / 3);
-
-    gl.disableVertexAttribArray(shader.attributes.position);
-    gl.disableVertexAttribArray(shader.attributes.color);
   }
 
   // Shape drawing based on article
@@ -366,110 +355,57 @@ export function init(gl: WebGL2RenderingContext) {
 
     setModelMatrix(tx);
 
-    const shaderShape = shaderMgr.use("shape", "shape");
-    gl.uniformBlockBinding(
-      shaderShape.program,
-      shaderShape.uniforms.viewData,
-      0
-    );
-    gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, modelViewProjection.buffer);
-
-    gl.enableVertexAttribArray(shaderShape.attributes.position);
-    gl.enableVertexAttribArray(shaderShape.attributes.offset);
-    gl.enableVertexAttribArray(shaderShape.attributes.fillColor);
-    gl.vertexAttribDivisor(shaderShape.attributes.position, 0);
-    gl.vertexAttribDivisor(shaderShape.attributes.offset, 1);
-    gl.vertexAttribDivisor(shaderShape.attributes.fillColor, 1);
-
-    pathBufs.vertices.bind();
-    gl.vertexAttribPointer(
-      shaderShape.attributes.position,
-      3,
-      gl.FLOAT,
-      false,
-      0,
-      0
-    );
-    sampleOffsetBuffer.bind();
-    gl.vertexAttribPointer(
-      shaderShape.attributes.offset,
-      3,
-      gl.FLOAT,
-      false,
-      0,
-      0
-    );
-    sampleColorBuffer.bind();
-    gl.vertexAttribPointer(
-      shaderShape.attributes.fillColor,
-      4,
-      gl.FLOAT,
-      false,
-      0,
-      0
+    shaderMgr.use(
+      ["shape", "shape"],
+      {
+        position: pathBufs.vertices,
+        offset: {
+          buffer: sampleOffsetBuffer,
+          rate: Rate.Instance,
+        },
+        fillColor: {
+          buffer: sampleColorBuffer,
+          rate: Rate.Instance,
+        },
+      },
+      (shader) => {
+        gl.uniformBlockBinding(shader.program, shader.uniforms.viewData, 0);
+        gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, modelViewProjection.buffer);
+        pathBufs.polysIdx.bind();
+        gl.drawElementsInstanced(
+          gl.TRIANGLES,
+          pathBufs.polysIdx.length,
+          pathBufs.pathIdxType,
+          0,
+          sampleOffsetBuffer.length / 3
+        );
+      }
     );
 
-    pathBufs.polysIdx.bind();
-    gl.drawElementsInstanced(
-      gl.TRIANGLES,
-      pathBufs.polysIdx.length,
-      pathBufs.pathIdxType,
-      0,
-      sampleOffsetBuffer.length / 3
+    shaderMgr.use(
+      ["shape", "shapeQuadratic"],
+      {
+        position: pathBufs.quadraticVertices,
+        offset: {
+          buffer: sampleOffsetBuffer,
+          rate: Rate.Instance,
+        },
+        fillColor: {
+          buffer: sampleColorBuffer,
+          rate: Rate.Instance,
+        },
+      },
+      (shader) => {
+        gl.uniformBlockBinding(shader.program, shader.uniforms.viewData, 0);
+        gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, modelViewProjection.buffer);
+        gl.drawArraysInstanced(
+          gl.TRIANGLES,
+          0,
+          pathBufs.quadraticVertices.length / 3,
+          sampleOffsetBuffer.length / 3
+        );
+      }
     );
-
-    gl.disableVertexAttribArray(shaderShape.attributes.position);
-    gl.disableVertexAttribArray(shaderShape.attributes.offset);
-    gl.disableVertexAttribArray(shaderShape.attributes.fillColor);
-
-    const shaderQuad = shaderMgr.use("shape", "shapeQuadratic");
-    gl.uniformBlockBinding(shaderQuad.program, shaderQuad.uniforms.viewData, 0);
-    gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, modelViewProjection.buffer);
-    gl.enableVertexAttribArray(shaderQuad.attributes.position);
-    gl.enableVertexAttribArray(shaderQuad.attributes.offset);
-    gl.enableVertexAttribArray(shaderQuad.attributes.fillColor);
-    gl.vertexAttribDivisor(shaderQuad.attributes.position, 0);
-    gl.vertexAttribDivisor(shaderQuad.attributes.offset, 1);
-    gl.vertexAttribDivisor(shaderQuad.attributes.fillColor, 1);
-
-    pathBufs.quadraticVertices.bind();
-    gl.vertexAttribPointer(
-      shaderQuad.attributes.position,
-      3,
-      gl.FLOAT,
-      false,
-      0,
-      0
-    );
-    sampleOffsetBuffer.bind();
-    gl.vertexAttribPointer(
-      shaderQuad.attributes.offset,
-      3,
-      gl.FLOAT,
-      false,
-      0,
-      0
-    );
-    sampleColorBuffer.bind();
-    gl.vertexAttribPointer(
-      shaderQuad.attributes.fillColor,
-      4,
-      gl.FLOAT,
-      false,
-      0,
-      0
-    );
-
-    gl.drawArraysInstanced(
-      gl.TRIANGLES,
-      0,
-      pathBufs.quadraticVertices.length / 3,
-      sampleOffsetBuffer.length / 3
-    );
-
-    gl.disableVertexAttribArray(shaderQuad.attributes.position);
-    gl.disableVertexAttribArray(shaderQuad.attributes.offset);
-    gl.disableVertexAttribArray(shaderQuad.attributes.fillColor);
   }
 
   function initShapeFb() {
@@ -488,10 +424,11 @@ export function init(gl: WebGL2RenderingContext) {
     );
     gl.blendEquation(gl.FUNC_ADD);
 
-    shaderMgr.use("fullscreenTriangle", "glyphPost");
-    gl.bindTexture(gl.TEXTURE_2D, glyphColor);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    gl.bindTexture(gl.TEXTURE_2D, null);
+    shaderMgr.use(["fullscreenTriangle", "glyphPost"], {}, () => {
+      gl.bindTexture(gl.TEXTURE_2D, glyphColor);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    });
   }
 
   function draw(t: number) {
@@ -529,52 +466,14 @@ export function init(gl: WebGL2RenderingContext) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(true); // not sure why this is necessary
-    shaderMgr.use("fullscreenTriangle", "linearToSrgb");
-    gl.bindTexture(gl.TEXTURE_2D, linearColor);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    shaderMgr.use(["fullscreenTriangle", "linearToSrgb"], {}, () => {
+      gl.bindTexture(gl.TEXTURE_2D, linearColor);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    });
   }
 
   return { draw: catchallDedupe(draw), resize: catchallDedupe(resize) };
-}
-
-function createStaticBuffer<T extends BufferSource & ArrayLike<any>>(
-  gl: WebGL2RenderingContext,
-  data: T,
-  target: number = gl.ARRAY_BUFFER
-) {
-  const buffer = gl.createBuffer();
-  if (buffer == null) throw new Error("Failed to create buffer");
-  gl.bindBuffer(target, buffer);
-  gl.bufferData(target, data, gl.STATIC_DRAW);
-
-  function bind() {
-    gl.bindBuffer(target, buffer);
-  }
-  return { buffer, bind, length: data.length };
-}
-
-function createDynamicBuffer(
-  gl: WebGL2RenderingContext,
-  target: number = gl.UNIFORM_BUFFER
-) {
-  const buffer = gl.createBuffer();
-  if (buffer == null) throw new Error("Failed to create buffer");
-  let size = 0;
-
-  function update(data: BufferSource) {
-    gl.bindBuffer(target, buffer);
-    let bufLen = data.byteLength;
-    if (bufLen > size) {
-      gl.bufferData(target, bufLen, gl.DYNAMIC_DRAW);
-      size = bufLen;
-    }
-    gl.bufferSubData(target, 0, data);
-  }
-  function bind() {
-    gl.bindBuffer(target, buffer);
-  }
-
-  return { buffer, bind, update };
 }
 
 export function catchallDedupe<Args extends any[]>(

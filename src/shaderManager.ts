@@ -1,15 +1,53 @@
+import { AnyBuffer, isAnyBuffer } from "./buffer";
 import { getShaderSource as getShaderSourceInit } from "./shaderSources";
 let getShaderSource = getShaderSourceInit;
+
+interface AttributeKind {
+  size: number;
+  type: number;
+}
+
+function kindForTypename(
+  gl: WebGL2RenderingContext,
+  typename: string
+): AttributeKind {
+  switch (typename) {
+    case "float":
+      return { size: 1, type: gl.FLOAT };
+    case "vec2":
+      return { size: 2, type: gl.FLOAT };
+    case "vec3":
+      return { size: 3, type: gl.FLOAT };
+    case "vec4":
+      return { size: 4, type: gl.FLOAT };
+    case "int":
+      return { size: 1, type: gl.INT };
+    case "ivec2":
+      return { size: 2, type: gl.INT };
+    case "ivec3":
+      return { size: 3, type: gl.INT };
+    case "ivec4":
+      return { size: 4, type: gl.INT };
+    default:
+      throw new Error(`Unsupported attribute type ${typename}`);
+  }
+}
 
 interface ShaderData {
   shader: WebGLShader;
   uniforms: Set<string>;
-  inAttributes: Set<string>;
-  outAttributes: Set<string>;
+  inAttributes: Map<string, AttributeKind>;
+  outAttributes: Map<string, AttributeKind>;
 }
 
-interface AttributeLocations {
-  [k: string]: number;
+export interface AttributeData {
+  index: number;
+  size: number;
+  type: number;
+}
+
+interface Attributes {
+  [k: string]: AttributeData;
 }
 
 interface UniformBlocks {
@@ -18,24 +56,25 @@ interface UniformBlocks {
 
 interface ProgramData {
   program: WebGLProgram;
-  attributes: AttributeLocations;
+  attributes: Attributes;
   uniforms: UniformBlocks;
 }
 
-function parseInputs(source: string) {
-  const inAttributes = new Set<string>();
-  const outAttributes = new Set<string>();
+function parseInputs(gl: WebGL2RenderingContext, source: string) {
+  const inAttributes = new Map<string, AttributeKind>();
+  const outAttributes = new Map<string, AttributeKind>();
   const uniforms = new Set<string>();
 
   const attribPattern = /^\s*(in|out)\s+(\w+)\s+(\w+)\s+(\w+)\s*;$/gm;
   const uniformBlockPattern = /^\s*uniform\s+(\w+)\s+\{/gm;
   let match;
   while ((match = attribPattern.exec(source))) {
-    const [_full, inout, _precision, _type, name] = match;
+    const [_full, inout, _precision, typename, name] = match;
+    const kind = kindForTypename(gl, typename);
     if (inout === "in") {
-      inAttributes.add(name);
+      inAttributes.set(name, kind);
     } else if (inout === "out") {
-      outAttributes.add(name);
+      outAttributes.set(name, kind);
     }
   }
   while ((match = uniformBlockPattern.exec(source))) {
@@ -110,7 +149,7 @@ function makeShaderManager(gl: WebGL2RenderingContext) {
       throw new Error(`Failed to compile shader '${filename}': ${info}`);
     }
 
-    const inputs = parseInputs(shaderSrc);
+    const inputs = parseInputs(gl, shaderSrc);
     const shaderData = {
       shader: shaderObj,
       inAttributes: inputs.inAttributes,
@@ -158,14 +197,18 @@ function makeShaderManager(gl: WebGL2RenderingContext) {
       );
     }
 
-    let attributes: AttributeLocations = {};
+    let attributes: Attributes = {};
     let uniforms: UniformBlocks = {};
 
-    for (const name of vertShader.inAttributes) {
+    for (const [name, kind] of vertShader.inAttributes) {
       if (name in attributes) continue;
-      const loc = gl.getAttribLocation(program, name);
-      if (loc >= 0) {
-        attributes[name] = loc;
+      const index = gl.getAttribLocation(program, name);
+      if (index >= 0) {
+        attributes[name] = {
+          index,
+          type: kind.type,
+          size: kind.size,
+        };
       }
     }
 
@@ -189,10 +232,26 @@ function makeShaderManager(gl: WebGL2RenderingContext) {
   }
 
   return {
-    use(vert: string, frag: string): ProgramData {
+    use(
+      [vert, frag]: [string, string],
+      attributes: { [k: string]: AttribSettings | AnyBuffer },
+      fn: (data: ProgramData) => void
+    ) {
       const programData = getProgramData(vert, frag);
       gl.useProgram(programData.program);
-      return programData;
+
+      const settings: InternalAttribSettings[] = Object.entries(attributes).map(
+        ([name, settings]) => {
+          const attribData = programData.attributes[name];
+          if (attribData == null)
+            throw new Error(`Unknown attribute '${name}'`);
+          return mapAttribSettings(settings, attribData);
+        }
+      );
+
+      withAttributes(gl, settings, () => {
+        fn(programData);
+      });
     },
     updateSourceData,
   };
@@ -202,6 +261,85 @@ const managerPerContext = new Map<
   WebGL2RenderingContext,
   ReturnType<typeof makeShaderManager>
 >();
+
+export enum Rate {
+  Vertex,
+  Instance,
+}
+
+interface AttribSettings {
+  buffer: AnyBuffer;
+  rate?: Rate;
+  normalized?: boolean;
+  stride?: number;
+  offset?: number;
+}
+
+interface InternalAttribSettings {
+  index: number;
+  buffer: AnyBuffer;
+  size: number;
+  type: number;
+  rate: Rate;
+  normalized: boolean;
+  stride: number;
+  offset: number;
+}
+
+function mapAttribSettings(
+  settings: AttribSettings | AnyBuffer,
+  attribData: AttributeData
+): InternalAttribSettings {
+  if (isAnyBuffer(settings)) {
+    return {
+      index: attribData.index,
+      buffer: settings,
+      size: attribData.size,
+      type: attribData.type,
+      rate: Rate.Vertex,
+      normalized: false,
+      stride: 0,
+      offset: 0,
+    };
+  } else {
+    return {
+      index: attribData.index,
+      buffer: settings.buffer,
+      size: attribData.size,
+      type: attribData.type,
+      rate: settings.rate ?? Rate.Vertex,
+      normalized: settings.normalized ?? false,
+      stride: settings.stride ?? 0,
+      offset: settings.offset ?? 0,
+    };
+  }
+}
+
+function withAttributes(
+  gl: WebGL2RenderingContext,
+  attribs: InternalAttribSettings[],
+  fn: () => void
+) {
+  for (const attrib of attribs) {
+    gl.enableVertexAttribArray(attrib.index);
+    gl.vertexAttribDivisor(attrib.index, attrib.rate === Rate.Instance ? 1 : 0);
+    attrib.buffer.bind();
+    gl.vertexAttribPointer(
+      attrib.index,
+      attrib.size,
+      attrib.type,
+      attrib.normalized,
+      attrib.stride,
+      attrib.offset
+    );
+  }
+
+  fn();
+
+  for (const attrib of attribs) {
+    gl.disableVertexAttribArray(attrib.index);
+  }
+}
 
 export function shaderManager(gl: WebGL2RenderingContext) {
   if (!managerPerContext.has(gl)) {

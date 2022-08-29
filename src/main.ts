@@ -13,17 +13,27 @@ function openGlContext(canvas: HTMLCanvasElement) {
   return gl;
 }
 
+let setStyleWidth = 0;
+let setStyleHeight = 0;
+
 function resizeCanvas() {
   const ratio = window.devicePixelRatio;
   const width = window.innerWidth;
   const height = window.innerHeight;
   const bufferWidth = Math.ceil(width * ratio);
   const bufferHeight = Math.ceil(height * ratio);
-  if (canvas.width !== bufferWidth || canvas.height !== bufferHeight) {
+  if (
+    canvas.width !== bufferWidth ||
+    canvas.height !== bufferHeight ||
+    setStyleWidth !== width ||
+    setStyleHeight !== height
+  ) {
     canvas.width = bufferWidth;
     canvas.height = bufferHeight;
     canvas.style.setProperty("width", `${width}px`);
     canvas.style.setProperty("height", `${height}px`);
+    setStyleWidth = width;
+    setStyleHeight = height;
     return true;
   }
   return false;
